@@ -1,4 +1,0 @@
-/Users/xylm/STM32_Team/A_code/03_DM02_MOTOR_MIT_N/User_File/1_Middleware/System/Timestamp/sys_timestamp.h:248:17:uint64_t Class_Timestamp::Get_Current_Timestamp() const	16	static
-/Users/xylm/STM32_Team/A_code/03_DM02_MOTOR_MIT_N/User_File/1_Middleware/Driver/USB/drv_usb.cpp:43:6:void USB_Init(USB_Callback)	16	static
-/Users/xylm/STM32_Team/A_code/03_DM02_MOTOR_MIT_N/User_File/1_Middleware/Driver/USB/drv_usb.cpp:56:9:uint8_t USB_Transmit_Data(uint8_t*, uint16_t)	16	static
-/Users/xylm/STM32_Team/A_code/03_DM02_MOTOR_MIT_N/User_File/1_Middleware/Driver/USB/drv_usb.cpp:66:6:void USB_ReceiveCallback(uint16_t)	16	static

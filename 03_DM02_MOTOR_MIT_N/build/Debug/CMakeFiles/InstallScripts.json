@@ -1,8 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/Users/xylm/STM32_Team/A_code/03_DM02_MOTOR_MIT_N/build/Debug/cmake_install.cmake",
-		"/Users/xylm/STM32_Team/A_code/03_DM02_MOTOR_MIT_N/build/Debug/cmake/stm32cubemx/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

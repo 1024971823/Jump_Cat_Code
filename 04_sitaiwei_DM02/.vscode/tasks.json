@@ -10,7 +10,8 @@
 			},
 			"args": [
 				"-f",
-				"../../User_Config/daplink.cfg",//使用中科大RM的配置
+				//"../../User_Config/daplink.cfg",//使用中科大RM的配置
+				"../../User_Config/stlink.cfg",//使用中科大RM的配置
 				//../../openocd.cfg",//使用同济大学RM的配置
 				"-c",
 				"program ${command:cmake.getLaunchTargetFilename} verify reset exit"

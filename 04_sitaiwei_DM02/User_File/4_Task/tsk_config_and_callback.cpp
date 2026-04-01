@@ -27,6 +27,7 @@
 #include "drv_wdg.h"
 #include "sys_timestamp.h"
 #include "dvc_serialplot.h"
+#include "dvc_motor_stw.h"
 
 /* Private macros ------------------------------------------------------------*/
 
@@ -48,6 +49,8 @@ bool blue_minus_flag = true;
 
 // 大疆电机3508
 Class_Motor_DJI_GM6020 motor;
+// 伺泰威8115-36电机 (MIT协议)
+Class_Motor_STW motor_stw;
 // Kalman滤波器
 Class_Filter_Kalman filter_kalman;
 // 相关矩阵
@@ -121,6 +124,10 @@ void SPI2_Callback(uint8_t *Tx_Buffer, uint8_t *Rx_Buffer, uint16_t Tx_Length, u
  *
  *
  */
+// 调试用: 记录CAN帧信息
+uint32_t debug_last_unknown_can_id = 0;
+uint32_t debug_unknown_can_count = 0;
+
 void CAN1_Callback(FDCAN_RxHeaderTypeDef &Header, uint8_t *Buffer)
 {
     switch (Header.Identifier)
@@ -129,6 +136,19 @@ void CAN1_Callback(FDCAN_RxHeaderTypeDef &Header, uint8_t *Buffer)
     {
         motor.CAN_RxCpltCallback();
 
+        break;
+    }
+    case (0x00):
+    {
+        // 伺泰威8115-36电机反馈帧, CAN ID = 0x00
+        debug_unknown_can_count++;
+        motor_stw.CAN_RxCpltCallback();
+
+        break;
+    }
+    default:
+    {
+        debug_last_unknown_can_id = Header.Identifier;
         break;
     }
     }
@@ -295,9 +315,22 @@ void Task1ms_Callback()
         mod100 = 0;
 
         motor.TIM_100ms_Alive_PeriodElapsedCallback();
+        // 伺泰威电机存活检测
+        motor_stw.TIM_100ms_Alive_PeriodElapsedCallback();
     }
     motor.Set_Target_Angle(1.0f * PI);
     motor.TIM_Calculate_PeriodElapsedCallback();
+
+    // 伺泰威8115-36电机 直接力矩模式: 发送固定反向力矩 -5 Nm
+    // 测试力矩通道的可控性, 观察电机是否减速/停止/反转
+    static int stw_mod5 = 0;
+    stw_mod5++;
+    if (stw_mod5 >= 5)
+    {
+        stw_mod5 = 0;
+        motor_stw.Set_Target_Torque(-5.0f);
+        motor_stw.TIM_Calculate_PeriodElapsedCallback();
+    }
 
     static int mod128 = 0;
     mod128++;
@@ -356,10 +389,18 @@ void Task1ms_Callback()
     float float_green = static_cast<float>(green);
     float float_blue = static_cast<float>(blue);
 
-    // 串口绘图
-    // IMU常规显示
-    Vofa_USB.Set_Data(23, &origin_accel_x, &origin_accel_y, &origin_accel_z, &origin_gyro_x, &origin_gyro_y, &origin_gyro_z, &q0, &q1, &q2, &q3, &yaw, &pitch, &roll, &temperature, &accel_x, &accel_y, &accel_z, &gyro_x, &gyro_y, &gyro_z, &loss, &calculating_time, &now_time);
-    // Vofa_USB.Set_Data(7, &motor_target_angle, &motor_now_angle, &motor_target_omega, &motor_now_omega, &motor_target_torque, &motor_now_torque, &filter_omega);
+    // 串口绘图 - 直接力矩诊断
+    // CH1: 反馈速度, CH2: 反馈力矩, CH3: 反馈角度, CH4: 输出力矩命令
+    // CH5: Tx[6], CH6: Tx[7], CH7: 帧计数
+    float stw_now_omega = motor_stw.Get_Now_Omega();
+    float stw_now_torque = motor_stw.Get_Now_Torque();
+    float stw_now_angle = motor_stw.Get_Now_Angle();
+    float stw_ctrl_torque = motor_stw.Get_Control_Torque();
+    const uint8_t *tx = motor_stw.Get_Tx_Data();
+    float tx6 = (float)tx[6];
+    float tx7 = (float)tx[7];
+    float stw_count = (float)debug_unknown_can_count;
+    Vofa_USB.Set_Data(7, &stw_now_omega, &stw_now_torque, &stw_now_angle, &stw_ctrl_torque, &tx6, &tx7, &stw_count);
     Vofa_USB.TIM_1ms_Write_PeriodElapsedCallback();
 
     TIM_1ms_CAN_PeriodElapsedCallback();
@@ -427,6 +468,12 @@ void Task_Init()
     motor.PID_Angle.Init(12.0f, 0.0f, 0.0f, 0.0f, 10.0f, 10.0f);
     motor.PID_Omega.Init(0.03f, 5.0f, 0.0f, 0.0f, 0.2f, 0.2f);
     motor.Init(&hfdcan1, Motor_DJI_ID_0x206, Motor_DJI_Control_Method_ANGLE, 0, PI / 6);
+
+    // 伺泰威8115-36电机初始化 (直接力矩模式, 测试力矩通道可控性)
+    // 参数: CAN总线, 电机ID=0x01, 力矩模式, P_MAX=95.5, V_MAX=45.0, T_MAX=18.0
+    motor_stw.Init(&hfdcan1, 0x01, Motor_STW_Control_Method_TORQUE, 95.5f, 45.0f, 18.0f);
+    // 使能电机
+    motor_stw.CAN_Send_Enter();
     A[0][0] = 1.0f;
     A[0][1] = 0.001f;
     A[1][0] = 0.0f;

@@ -558,6 +558,13 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
+    // HAL时基(TIM13)必须始终递增, 否则初始化阶段可能卡死在依赖HAL tick的流程
+    if (htim->Instance == TIM13)
+    {
+        HAL_IncTick();
+        return;
+    }
+
     if (!init_finished)
     {
         return;
@@ -583,10 +590,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     else if (htim->Instance == TIM8)
     {
         Task125us_Callback();
-    }
-    else if (htim->Instance == TIM13)
-    {
-    HAL_IncTick();
     }
 }
 
@@ -615,7 +618,17 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
  *   若实测方向不对, 修改下方正负号或调换右侧电机CAN ID
  */
 extern "C" void RTOS_Ctrl_Task_Loop(void)
-{
+{   
+
+
+
+
+
+
+
+
+
+
     /* 使用 PRIMASK 短暂关全局中断来原子读取 16 字节 SBUS 数据结构
      * 避免在 UART DMA 回调写入过程中读到撕裂帧 */
     uint32_t primask = __get_PRIMASK();
@@ -683,10 +696,71 @@ extern "C" void RTOS_Ctrl_Task_Loop(void)
  * @brief RTOS 遥控任务主循环 (remote_task, 20ms)
  *
  * 预留位置: 可在此添加基于拨杆的模式切换、急停逻辑等
- * 示例: if (i6x_switch_is_down(rc->s[0])) { /* 急停 */ }
+ * 示例: if (i6x_switch_is_down(rc->s[0])) {  急停 
  */
 extern "C" void RTOS_Remote_Task_Loop(void)
-{
+{       static int mod10 = 0;
+    mod10++;
+    if (mod10 == 10)
+    {
+        mod10 = 0;
+
+        if (red >= 18)
+        {
+            red_minus_flag = true;
+        }
+        else if (red == 0)
+        {
+            red_minus_flag = false;
+        }
+        if (green >= 18)
+        {
+            green_minus_flag = true;
+        }
+        else if (green == 0)
+        {
+            green_minus_flag = false;
+        }
+        if (blue >= 18)
+        {
+            blue_minus_flag = true;
+        }
+        else if (blue == 0)
+        {
+            blue_minus_flag = false;
+        }
+
+        if (red_minus_flag)
+        {
+            red--;
+        }
+        else
+        {
+            red++;
+        }
+        if (green_minus_flag)
+        {
+            green--;
+        }
+        else
+        {
+            green++;
+        }
+        if (blue_minus_flag)
+        {
+            blue--;
+        }
+        else
+        {
+            blue++;
+        }
+
+        BSP_WS2812.Set_RGB(red, green, blue);
+        // BSP_WS2812.Set_RGB(0, 0, 0);
+
+        // 发送实例
+        BSP_WS2812.TIM_10ms_Write_PeriodElapsedCallback();
+    }
     /* 预留: 通过 get_i6x_point()->s[x] 读取拨杆状态做模式控制 */
     (void)get_i6x_point();
 }

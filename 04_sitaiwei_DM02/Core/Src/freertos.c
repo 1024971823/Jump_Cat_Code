@@ -209,8 +209,6 @@ void MX_FREERTOS_Init(void) {
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument)
 {
-  /* init code for USB_DEVICE */
-  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN StartDefaultTask */
   /* Infinite loop */
   for(;;)
@@ -251,10 +249,12 @@ void Start_ctrl_task(void *argument)
 void Start_remote_task(void *argument)
 {
   /* USER CODE BEGIN Start_remote_task */
-  /* Infinite loop */
+  uint32_t tick = osKernelGetTickCount();
   for(;;)
   {
-    osDelay(1);
+    tick += 20U;
+    osDelayUntil(tick);
+    RTOS_Remote_Task_Loop();
   }
   /* USER CODE END Start_remote_task */
 }
@@ -269,10 +269,11 @@ void Start_remote_task(void *argument)
 void Start_monitor_task(void *argument)
 {
   /* USER CODE BEGIN Start_monitor_task */
-  /* Infinite loop */
+  /* 低优先级监控任务: 50ms 执行一次, 可在此添加调试输出或状态打印 */
   for(;;)
   {
-    osDelay(1);
+    osDelay(50U);
+    /* 预留: 可扩展监控内容, 如串口打印四电机状态、遥控帧率等 */
   }
   /* USER CODE END Start_monitor_task */
 }

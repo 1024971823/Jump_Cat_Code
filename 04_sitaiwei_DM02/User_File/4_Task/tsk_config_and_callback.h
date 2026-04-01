@@ -31,6 +31,12 @@ void Task_Init();
 
 void Task_Loop();
 
+/** 由 freertos.c 的 ctrl_task 每 1ms 调用一次: 遥控→混控→四电机速度控制 */
+void RTOS_Ctrl_Task_Loop(void);
+
+/** 由 freertos.c 的 remote_task 每 20ms 调用一次: 遥控状态机/模式切换 */
+void RTOS_Remote_Task_Loop(void);
+
 #ifdef __cplusplus
 };
 #endif

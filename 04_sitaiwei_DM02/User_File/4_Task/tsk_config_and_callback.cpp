@@ -28,6 +28,7 @@
 #include "sys_timestamp.h"
 #include "dvc_serialplot.h"
 #include "dvc_motor_stw.h"
+#include "i6x.h"
 
 /* Private macros ------------------------------------------------------------*/
 
@@ -49,8 +50,9 @@ bool blue_minus_flag = true;
 
 // 大疆电机3508
 Class_Motor_DJI_GM6020 motor;
-// 伺泰威8115-36电机 (MIT协议)
-Class_Motor_STW motor_stw;
+// 伺泰威8115-36电机 (MIT协议), 四电机数组
+// 索引: [0]=左前(0x01), [1]=左后(0x02), [2]=右前(0x03), [3]=右后(0x04)
+Class_Motor_STW motor_stw[4];
 // Kalman滤波器
 Class_Filter_Kalman filter_kalman;
 // 相关矩阵
@@ -140,10 +142,13 @@ void CAN1_Callback(FDCAN_RxHeaderTypeDef &Header, uint8_t *Buffer)
     }
     case (0x00):
     {
-        // 伺泰威8115-36电机反馈帧, CAN ID = 0x00
+        // 伺泰威8115-36反馈帧 CAN ID=0x00, Data[0]携带电机ID
+        // 每个电机对象内部在Data_Process()中自行过滤Motor_ID, 全部调用即可
         debug_unknown_can_count++;
-        motor_stw.CAN_RxCpltCallback();
-
+        for (int i = 0; i < 4; i++)
+        {
+            motor_stw[i].CAN_RxCpltCallback();
+        }
         break;
     }
     default:
@@ -157,6 +162,20 @@ void CAN1_Callback(FDCAN_RxHeaderTypeDef &Header, uint8_t *Buffer)
 /**
  * @brief OSPI2轮询回调函数
  *
+ * @brief UART5 SBUS接收回调 (由drv_uart DMA空闲中断触发)
+ * @note  接收机信号需反相后接入UART5_RX:
+ *        - 有硬件反相器(74HC14等): 直接连接
+ *        - 无反相器: 在CubeMX中为UART5开启 "RX pin active level inversion"
+ */
+static void UART5_SBUS_Callback(uint8_t *Buffer, uint16_t Length)
+{
+    if (Length == I6X_FRAME_LENGTH)
+    {
+        sbus_to_i6x(get_i6x_point(), Buffer);
+    }
+}
+
+/**
  */
 void OSPI2_Polling_Callback()
 {
@@ -315,22 +334,10 @@ void Task1ms_Callback()
         mod100 = 0;
 
         motor.TIM_100ms_Alive_PeriodElapsedCallback();
-        // 伺泰威电机存活检测
-        motor_stw.TIM_100ms_Alive_PeriodElapsedCallback();
+        // STW电机存活检测已移至RTOS ctrl_task, 避免与ctrl_task并发发送CAN帧
     }
     motor.Set_Target_Angle(1.0f * PI);
     motor.TIM_Calculate_PeriodElapsedCallback();
-
-    // 伺泰威8115-36电机 直接力矩模式: 发送固定反向力矩 -5 Nm
-    // 测试力矩通道的可控性, 观察电机是否减速/停止/反转
-    static int stw_mod5 = 0;
-    stw_mod5++;
-    if (stw_mod5 >= 5)
-    {
-        stw_mod5 = 0;
-        motor_stw.Set_Target_Torque(-5.0f);
-        motor_stw.TIM_Calculate_PeriodElapsedCallback();
-    }
 
     static int mod128 = 0;
     mod128++;
@@ -392,11 +399,12 @@ void Task1ms_Callback()
     // 串口绘图 - 直接力矩诊断
     // CH1: 反馈速度, CH2: 反馈力矩, CH3: 反馈角度, CH4: 输出力矩命令
     // CH5: Tx[6], CH6: Tx[7], CH7: 帧计数
-    float stw_now_omega = motor_stw.Get_Now_Omega();
-    float stw_now_torque = motor_stw.Get_Now_Torque();
-    float stw_now_angle = motor_stw.Get_Now_Angle();
-    float stw_ctrl_torque = motor_stw.Get_Control_Torque();
-    const uint8_t *tx = motor_stw.Get_Tx_Data();
+    // VOFA调试: 仅观察电机0 (左前) 状态
+    float stw_now_omega = motor_stw[0].Get_Now_Omega();
+    float stw_now_torque = motor_stw[0].Get_Now_Torque();
+    float stw_now_angle = motor_stw[0].Get_Now_Angle();
+    float stw_ctrl_torque = motor_stw[0].Get_Control_Torque();
+    const uint8_t *tx = motor_stw[0].Get_Tx_Data();
     float tx6 = (float)tx[6];
     float tx7 = (float)tx[7];
     float stw_count = (float)debug_unknown_can_count;
@@ -469,11 +477,21 @@ void Task_Init()
     motor.PID_Omega.Init(0.03f, 5.0f, 0.0f, 0.0f, 0.2f, 0.2f);
     motor.Init(&hfdcan1, Motor_DJI_ID_0x206, Motor_DJI_Control_Method_ANGLE, 0, PI / 6);
 
-    // 伺泰威8115-36电机初始化 (直接力矩模式, 测试力矩通道可控性)
-    // 参数: CAN总线, 电机ID=0x01, 力矩模式, P_MAX=95.5, V_MAX=45.0, T_MAX=18.0
-    motor_stw.Init(&hfdcan1, 0x01, Motor_STW_Control_Method_TORQUE, 95.5f, 45.0f, 18.0f);
-    // 使能电机
-    motor_stw.CAN_Send_Enter();
+    // 四个8115-36电机初始化 (速度闭环模式)
+    // CAN ID: 0x01=左前, 0x02=左后, 0x03=右前, 0x04=右后
+    // PID_Omega 参数为保守初值, 需根据实际负载调整 Kp
+    {
+        const uint8_t motor_ids[4] = {0x01, 0x02, 0x03, 0x04};
+        for (int i = 0; i < 4; i++)
+        {
+            motor_stw[i].PID_Omega.Init(0.5f, 0.0f, 0.0f, 0.0f, 5.0f, 18.0f);
+            motor_stw[i].Init(&hfdcan1, motor_ids[i],
+                              Motor_STW_Control_Method_OMEGA, 95.5f, 45.0f, 18.0f);
+            motor_stw[i].CAN_Send_Enter();
+        }
+    }
+    // UART5: SBUS接收机 (100kbaud 9E2 RX-only, 已在CubeMX中配置)
+    UART_Init(&huart5, UART5_SBUS_Callback);
     A[0][0] = 1.0f;
     A[0][1] = 0.001f;
     A[1][0] = 0.0f;
@@ -566,6 +584,109 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     {
         Task125us_Callback();
     }
+    else if (htim->Instance == TIM13)
+    {
+    HAL_IncTick();
+    }
 }
 
 /************************ COPYRIGHT(C) USTC-ROBOWALKER **************************/
+
+/* ============================================================
+ * RTOS 任务实现
+ * 由 freertos.c 的对应任务调用, 声明在 tsk_config_and_callback.h
+ * ============================================================ */
+
+/**
+ * @brief RTOS 控制任务主循环 (ctrl_task, 1ms)
+ *
+ * 功能: SBUS遥控 → 差速混控 → 四轮速度指令 → CAN输出
+ *
+ * 遥控通道:
+ *   ch[1] 右摇杆上下 = 前进/后退 (speed)
+ *   ch[3] 左摇杆左右 = 左转/右转 (turn)
+ *
+ * 差速公式:
+ *   left_omega  = speed + turn
+ *   right_omega = speed - turn
+ *
+ * 电机方向:
+ *   右侧电机物理安装方向与左侧相反, 因此 right_omega 取反
+ *   若实测方向不对, 修改下方正负号或调换右侧电机CAN ID
+ */
+extern "C" void RTOS_Ctrl_Task_Loop(void)
+{
+    /* 使用 PRIMASK 短暂关全局中断来原子读取 16 字节 SBUS 数据结构
+     * 避免在 UART DMA 回调写入过程中读到撕裂帧 */
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    i6x_ctrl_t rc = *get_i6x_point();
+    __set_PRIMASK(primask);
+
+    /* Failsafe: 遥控器断连 → 立即清零所有电机目标速度 */
+    if (rc.failsafe || rc.frame_lost)
+    {
+        for (int i = 0; i < 4; i++)
+        {
+            motor_stw[i].Set_Target_Omega(0.0f);
+            motor_stw[i].TIM_Calculate_PeriodElapsedCallback();
+        }
+        return;
+    }
+
+    /* 死区处理: 摇杆在中心区域输出为零 */
+    const int16_t DEADBAND = 20;
+    int16_t ch_speed = (rc.ch[1] > DEADBAND || rc.ch[1] < -DEADBAND) ? rc.ch[1] : 0;
+    int16_t ch_turn  = (rc.ch[3] > DEADBAND || rc.ch[3] < -DEADBAND) ? rc.ch[3] : 0;
+
+    /* 归一化: ch范围±660 → rad/s */
+    const float MAX_OMEGA = 30.0f;   /* rad/s, 保守限速约64% of 45rad/s额定转速 */
+    float speed = (float)ch_speed / 660.0f * MAX_OMEGA;
+    float turn  = (float)ch_turn  / 660.0f * MAX_OMEGA;
+
+    /* 差速混控 */
+    float left_omega  = speed + turn;
+    float right_omega = speed - turn;
+
+    /* 限幅 */
+    if (left_omega  >  MAX_OMEGA) left_omega  =  MAX_OMEGA;
+    if (left_omega  < -MAX_OMEGA) left_omega  = -MAX_OMEGA;
+    if (right_omega >  MAX_OMEGA) right_omega =  MAX_OMEGA;
+    if (right_omega < -MAX_OMEGA) right_omega = -MAX_OMEGA;
+
+    /* 设置四电机目标速度 */
+    motor_stw[0].Set_Target_Omega( left_omega);   /* 左前 */
+    motor_stw[1].Set_Target_Omega( left_omega);   /* 左后 */
+    motor_stw[2].Set_Target_Omega(-right_omega);  /* 右前 (安装方向相反) */
+    motor_stw[3].Set_Target_Omega(-right_omega);  /* 右后 (安装方向相反) */
+
+    /* 执行PID计算并发送CAN帧 */
+    for (int i = 0; i < 4; i++)
+    {
+        motor_stw[i].TIM_Calculate_PeriodElapsedCallback();
+    }
+
+    /* 电机存活检测: 每100次 ≈ 100ms 执行一次
+     * 离线电机会自动重发使能帧, 全部在ctrl_task中操作避免ISR竞争 */
+    static uint32_t alive_counter = 0U;
+    if (++alive_counter >= 100U)
+    {
+        alive_counter = 0U;
+        for (int i = 0; i < 4; i++)
+        {
+            motor_stw[i].TIM_100ms_Alive_PeriodElapsedCallback();
+        }
+    }
+}
+
+/**
+ * @brief RTOS 遥控任务主循环 (remote_task, 20ms)
+ *
+ * 预留位置: 可在此添加基于拨杆的模式切换、急停逻辑等
+ * 示例: if (i6x_switch_is_down(rc->s[0])) { /* 急停 */ }
+ */
+extern "C" void RTOS_Remote_Task_Loop(void)
+{
+    /* 预留: 通过 get_i6x_point()->s[x] 读取拨杆状态做模式控制 */
+    (void)get_i6x_point();
+}

@@ -49,6 +49,13 @@
 
 ---
 
+### 问题 7（已修复）：VOFA USB 输出放在 TIM7 ISR 中，只能看单个电机，且不适合长期占用中断上下文
+**文件**：`User_File/4_Task/tsk_config_and_callback.cpp`、`Core/Src/freertos.c`  
+**原因**：旧实现把 VOFA USB 发送放在 `Task1ms_Callback()` 中，只输出左前电机的少量调试量。这样既看不到四个电机的整体状态，也会把 USB CDC 发送放进 1ms 中断上下文，后续扩展不稳妥。  
+**修复**：新增 `RTOS_Monitor_Task_Loop()`，由 `monitor_task` 每 20ms 输出四个 STW 电机共 24 路 justfloat 通道，TIM7 ISR 中不再直接发送 VOFA 数据。
+
+---
+
 ## 二、新增内容
 
 ### 2.1 SBUS 遥控解析文件
@@ -91,10 +98,13 @@ s[3]       = 三档拨杆 (-1/0/+1)
 ### 2.3 FreeRTOS 任务结构
 
 ```
+main()
+    └─ MX_USB_DEVICE_Init()  ← 调度器启动前完成 USB CDC 初始化
+    
 osKernelStart()
     │
     ├─ defaultTask  [Normal]  1ms
-    │   └─ MX_USB_DEVICE_Init() → osDelay(1) 循环
+    │   └─ osDelay(1) 空循环
     │
     ├─ ctrl_task    [High]    1ms  ← 核心控制
     │   └─ RTOS_Ctrl_Task_Loop()
@@ -108,14 +118,16 @@ osKernelStart()
     ├─ remote_task  [AboveNormal] 20ms
     │   └─ RTOS_Remote_Task_Loop() ← 预留：拨杆模式切换
     │
-    └─ monitor_task [Low]     50ms
-        └─ 预留：调试输出
+    └─ monitor_task [Low]     20ms
+        └─ RTOS_Monitor_Task_Loop()
+            ├─ 原子快照四个 STW 电机状态
+            ├─ 打包 24 路 VOFA+ justfloat 通道
+            └─ USB CDC 输出
 
 TIM7 ISR (1ms, 独立于 RTOS Tick)
     ├─ LED / Buzzer / Key 处理
     ├─ DJI motor alive check (每100ms)
     ├─ BMI088 (每128ms)
-    ├─ VOFA USB 输出
     ├─ TIM_1ms_CAN (DJI 电机 CAN 发送)
     └─ TIM_1ms_IWDG (喂狗 ← 必须保留在 ISR，不能放到任务)
 ```
@@ -138,6 +150,53 @@ $$
 $$
 
 右侧电机因物理安装方向相反取反后下发。若实测前进时某侧反转，修改 `RTOS_Ctrl_Task_Loop` 中对应的正负号即可。
+
+---
+
+### 2.5 USB 虚拟串口 VOFA+ 四电机监控
+
+**发送任务**：`monitor_task`  
+**发送周期**：20ms  
+**协议**：VOFA+ `justfloat`  
+**总通道数**：24（4 个电机 × 每电机 6 个状态量）
+
+**每个电机的通道顺序固定如下**：
+
+1. `Target_Omega` 目标速度，单位 `rad/s`
+2. `Now_Omega` 当前反馈速度，单位 `rad/s`
+3. `Control_Torque` 当前控制扭矩命令，单位 `Nm`
+4. `Now_Torque` 当前反馈扭矩，单位 `Nm`
+5. `Now_Angle` 当前反馈角度，单位 `rad`
+6. `Status` 电机状态，`0=DISABLE`，`1=ENABLE`
+
+**24 路通道映射表**：
+
+| 通道 | 电机 | 含义 |
+| ---- | ---- | ---- |
+| CH1  | 左前 `motor_stw[0]` | `Target_Omega` |
+| CH2  | 左前 `motor_stw[0]` | `Now_Omega` |
+| CH3  | 左前 `motor_stw[0]` | `Control_Torque` |
+| CH4  | 左前 `motor_stw[0]` | `Now_Torque` |
+| CH5  | 左前 `motor_stw[0]` | `Now_Angle` |
+| CH6  | 左前 `motor_stw[0]` | `Status` |
+| CH7  | 左后 `motor_stw[1]` | `Target_Omega` |
+| CH8  | 左后 `motor_stw[1]` | `Now_Omega` |
+| CH9  | 左后 `motor_stw[1]` | `Control_Torque` |
+| CH10 | 左后 `motor_stw[1]` | `Now_Torque` |
+| CH11 | 左后 `motor_stw[1]` | `Now_Angle` |
+| CH12 | 左后 `motor_stw[1]` | `Status` |
+| CH13 | 右前 `motor_stw[2]` | `Target_Omega` |
+| CH14 | 右前 `motor_stw[2]` | `Now_Omega` |
+| CH15 | 右前 `motor_stw[2]` | `Control_Torque` |
+| CH16 | 右前 `motor_stw[2]` | `Now_Torque` |
+| CH17 | 右前 `motor_stw[2]` | `Now_Angle` |
+| CH18 | 右前 `motor_stw[2]` | `Status` |
+| CH19 | 右后 `motor_stw[3]` | `Target_Omega` |
+| CH20 | 右后 `motor_stw[3]` | `Now_Omega` |
+| CH21 | 右后 `motor_stw[3]` | `Control_Torque` |
+| CH22 | 右后 `motor_stw[3]` | `Now_Torque` |
+| CH23 | 右后 `motor_stw[3]` | `Now_Angle` |
+| CH24 | 右后 `motor_stw[3]` | `Status` |
 
 ---
 
@@ -196,20 +255,131 @@ cmake --build build/Debug --parallel
 
 ---
 
+### 步骤 6：VOFA+ 上位机查看四电机状态
+
+1. 将开发板通过 USB 连接电脑，识别出 CDC 虚拟串口。
+2. 打开 VOFA+，新建 `JustFloat` 数据源，选择对应串口。
+3. 按上面的 24 路通道映射表添加波形或仪表盘。
+4. 建议先看以下 8 路：`CH1/CH2/CH7/CH8/CH13/CH14/CH19/CH20`，用于比较四轮目标速度与实际速度是否一致。
+5. 若要看扭矩闭环工作情况，再加 `CH3/CH4/CH9/CH10/CH15/CH16/CH21/CH22`。
+
+---
+
 ## 四、文件变更总览
 
 | 文件                                           | 类型     | 主要变更                                                   |
 | ---------------------------------------------- | -------- | ---------------------------------------------------------- |
 | `User_File/2_Device/Remote/i6x.h`              | **新建** | SBUS 数据结构 & 接口                                       |
 | `User_File/2_Device/Remote/i6x.c`              | **新建** | SBUS 解帧（含 Bug 修复）                                   |
-| `User_File/4_Task/tsk_config_and_callback.h`   | **修改** | 新增 `RTOS_Ctrl_Task_Loop` / `RTOS_Remote_Task_Loop` 声明  |
-| `User_File/4_Task/tsk_config_and_callback.cpp` | **修改** | 四电机数组、SBUS 回调、CAN 分发、删测试代码、RTOS 任务实现 |
-| `Core/Src/freertos.c`                          | **修改** | include 添加、monitor 栈扩容、三个任务体实现               |
+| `User_File/4_Task/tsk_config_and_callback.h`   | **修改** | 新增 `RTOS_Ctrl_Task_Loop` / `RTOS_Remote_Task_Loop` / `RTOS_Monitor_Task_Loop` 声明 |
+| `User_File/4_Task/tsk_config_and_callback.cpp` | **修改** | 四电机数组、SBUS 回调、CAN 分发、RTOS 控制任务、VOFA+ 四电机状态打包与发送 |
+| `Core/Src/freertos.c`                          | **修改** | include 添加、monitor 栈扩容、三个任务体实现、monitor_task 周期发送 VOFA+ |
 | `Core/Src/main.c`                              | **修改** | 删除 `osKernelStart()` 后不可达的 `Task_Loop()` 调用       |
+| `README_FREERTOS_MIGRATION.md`                 | **修改** | 补充 VOFA+ 四电机监控说明与二次修改指南                   |
 
 ---
 
-## 五、注意事项
+## 五、VOFA+ 修改位置与二次修改方法
+
+### 5.1 修改发送周期
+
+**位置**：`Core/Src/freertos.c` 中 `Start_monitor_task()`  
+**当前实现**：
+
+```c
+tick += 20U;
+osDelayUntil(tick);
+RTOS_Monitor_Task_Loop();
+```
+
+**如何改**：
+- 改成 `10U`：发送周期变为 10ms，刷新更快，但 USB 带宽占用更高。
+- 改成 `50U`：发送周期变为 50ms，曲线更稀疏，但更省资源。
+
+---
+
+### 5.2 修改发送内容
+
+**位置**：`User_File/4_Task/tsk_config_and_callback.cpp`
+
+需要看这 3 个点：
+
+1. `enum Enum_Vofa_STW_Channel`
+   这里定义了每个电机发哪些量，以及顺序。
+2. `Update_Vofa_STW_Monitor_Data()`
+   这里决定每个通道实际采集什么变量。
+3. `Send_Vofa_STW_Monitor_Data()`
+   这里决定发送多少个通道，以及通道排列顺序。
+
+**当前每电机 6 路**：
+
+```cpp
+Target_Omega
+Now_Omega
+Control_Torque
+Now_Torque
+Now_Angle
+Status
+```
+
+**如果你想把 `Now_Angle` 改成 `K_P` 或 `K_D`**：
+
+1. 在 `Update_Vofa_STW_Monitor_Data()` 中，把
+   `vofa_stw_monitor_data[i][Vofa_STW_Channel_Now_Angle] = motor_stw[i].Get_Now_Angle();`
+   改成你想看的量。
+2. 同步修改本 README 的通道映射表，避免后续看图时混淆。
+
+---
+
+### 5.3 修改通道数量
+
+**位置**：`User_File/4_Task/tsk_config_and_callback.cpp` 中 `Send_Vofa_STW_Monitor_Data()`
+
+当前代码是：
+
+```cpp
+Vofa_USB.Set_Data(24, ...);
+```
+
+`24` 表示发送 24 路通道。  
+`Class_Vofa_USB` 的限制也是最多 24 路，因此：
+
+- 若你减少变量，可以把 `24` 改小，并删掉后面的多余指针。
+- 若你想增加新量，必须先从已有 24 路里替换，不能继续往上加。
+
+---
+
+### 5.4 修改 VOFA+ 接收命令变量名
+
+**位置**：`User_File/4_Task/tsk_config_and_callback.cpp` 顶部
+
+```cpp
+char Vofa_Variable_Assignment_List[][VOFA_RX_VARIABLE_ASSIGNMENT_MAX_LENGTH] = {"q00", "q11", "r00", "r11",};
+```
+
+这 4 个名字用于 VOFA+ 下发调参命令，当前分别对应 Kalman 的 `Q[0][0] / Q[1][1] / R[0][0] / R[1][1]`。  
+如果你想改成别的名字，比如 `kp0`、`ki0`，需要同时修改：
+
+1. 这个字符串数组。
+2. `Serial_USB_Call_Back()` 里 `switch(index)` 对应索引的处理逻辑。
+
+---
+
+### 5.5 修改监控对象
+
+**位置**：`User_File/4_Task/tsk_config_and_callback.cpp` 中 `Update_Vofa_STW_Monitor_Data()`
+
+如果你后面不想看四个 STW 电机，而是想看：
+
+- DJI 云台电机
+- 遥控器通道值
+- IMU 姿态角
+
+最直接的做法就是把 `motor_stw[i].Get_xxx()` 换成对应对象的 `Get_xxx()`，然后再按新的变量顺序改 `Send_Vofa_STW_Monitor_Data()` 与本 README 的通道表。
+
+---
+
+## 六、注意事项
 
 1. **不要在 CubeMX 重新生成代码时覆盖 USER CODE 区域**  
    所有修改均写在 `/* USER CODE BEGIN ... */` / `/* USER CODE END ... */` 之间，CubeMX 重新生成会保留这些区域。  
@@ -223,3 +393,6 @@ cmake --build build/Debug --parallel
 
 4. **右侧电机方向**  
    `motor_stw[2]` 和 `motor_stw[3]` 的目标速度取了负号（`-right_omega`）。这是基于"右侧电机安装方向与左侧相反"的假设。实测若不符，修改 [tsk_config_and_callback.cpp](User_File/4_Task/tsk_config_and_callback.cpp) 中 `RTOS_Ctrl_Task_Loop` 对应正负号即可。
+
+5. **VOFA+ 输出已移出 TIM7 ISR**  
+   现在 USB VOFA+ 数据由 `monitor_task` 发送，不要再把大量 USB 输出塞回 `Task1ms_Callback()`，否则会重新把 CDC 发送拉回中断上下文。

@@ -66,7 +66,24 @@ Class_Matrix_f32<2, 2> P;
 // 全局初始化完成标志位
 bool init_finished = false;
 
+// VOFA+ 四电机监控通道定义: 每个电机 6 个量
+enum Enum_Vofa_STW_Channel
+{
+    Vofa_STW_Channel_Target_Omega = 0,
+    Vofa_STW_Channel_Now_Omega,
+    Vofa_STW_Channel_Control_Torque,
+    Vofa_STW_Channel_Now_Torque,
+    Vofa_STW_Channel_Now_Angle,
+    Vofa_STW_Channel_Status,
+    Vofa_STW_Channel_Num,
+};
+
+static float vofa_stw_monitor_data[4][Vofa_STW_Channel_Num] = {0.0f};
+
 /* Private function declarations ---------------------------------------------*/
+
+static void Update_Vofa_STW_Monitor_Data(void);
+static void Send_Vofa_STW_Monitor_Data(void);
 
 /* Function prototypes -------------------------------------------------------*/
 
@@ -197,6 +214,53 @@ void OSPI2_Rx_Callback(uint8_t *Buffer)
 void OSPI2_Tx_Callback(uint8_t *Buffer)
 {
     BSP_W25Q64JV.OSPI_TxCallback();
+}
+
+/**
+ * @brief 更新 VOFA+ 四电机监控缓存
+ *
+ * 通道顺序:
+ *   电机0: 目标速度 / 当前速度 / 控制扭矩 / 当前扭矩 / 当前角度 / 使能状态
+ *   电机1: 同上
+ *   电机2: 同上
+ *   电机3: 同上
+ */
+static void Update_Vofa_STW_Monitor_Data(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    for (int i = 0; i < 4; i++)
+    {
+        vofa_stw_monitor_data[i][Vofa_STW_Channel_Target_Omega] = motor_stw[i].Get_Target_Omega();
+        vofa_stw_monitor_data[i][Vofa_STW_Channel_Now_Omega] = motor_stw[i].Get_Now_Omega();
+        vofa_stw_monitor_data[i][Vofa_STW_Channel_Control_Torque] = motor_stw[i].Get_Control_Torque();
+        vofa_stw_monitor_data[i][Vofa_STW_Channel_Now_Torque] = motor_stw[i].Get_Now_Torque();
+        vofa_stw_monitor_data[i][Vofa_STW_Channel_Now_Angle] = motor_stw[i].Get_Now_Angle();
+        vofa_stw_monitor_data[i][Vofa_STW_Channel_Status] = static_cast<float>(motor_stw[i].Get_Status());
+    }
+    __set_PRIMASK(primask);
+}
+
+/**
+ * @brief 发送 VOFA+ 四电机监控数据
+ *
+ * @note Class_Vofa_USB 的发送接口虽然名为 TIM_1ms_Write_PeriodElapsedCallback，
+ *       实际只是打包并发送一帧 justfloat 数据，不要求必须在 1ms 中断内调用。
+ */
+static void Send_Vofa_STW_Monitor_Data(void)
+{
+    Update_Vofa_STW_Monitor_Data();
+
+    Vofa_USB.Set_Data(24,
+                      &vofa_stw_monitor_data[0][0], &vofa_stw_monitor_data[0][1], &vofa_stw_monitor_data[0][2],
+                      &vofa_stw_monitor_data[0][3], &vofa_stw_monitor_data[0][4], &vofa_stw_monitor_data[0][5],
+                      &vofa_stw_monitor_data[1][0], &vofa_stw_monitor_data[1][1], &vofa_stw_monitor_data[1][2],
+                      &vofa_stw_monitor_data[1][3], &vofa_stw_monitor_data[1][4], &vofa_stw_monitor_data[1][5],
+                      &vofa_stw_monitor_data[2][0], &vofa_stw_monitor_data[2][1], &vofa_stw_monitor_data[2][2],
+                      &vofa_stw_monitor_data[2][3], &vofa_stw_monitor_data[2][4], &vofa_stw_monitor_data[2][5],
+                      &vofa_stw_monitor_data[3][0], &vofa_stw_monitor_data[3][1], &vofa_stw_monitor_data[3][2],
+                      &vofa_stw_monitor_data[3][3], &vofa_stw_monitor_data[3][4], &vofa_stw_monitor_data[3][5]);
+    Vofa_USB.TIM_1ms_Write_PeriodElapsedCallback();
 }
 
 /**
@@ -396,20 +460,7 @@ void Task1ms_Callback()
     float float_green = static_cast<float>(green);
     float float_blue = static_cast<float>(blue);
 
-    // 串口绘图 - 直接力矩诊断
-    // CH1: 反馈速度, CH2: 反馈力矩, CH3: 反馈角度, CH4: 输出力矩命令
-    // CH5: Tx[6], CH6: Tx[7], CH7: 帧计数
-    // VOFA调试: 仅观察电机0 (左前) 状态
-    float stw_now_omega = motor_stw[0].Get_Now_Omega();
-    float stw_now_torque = motor_stw[0].Get_Now_Torque();
-    float stw_now_angle = motor_stw[0].Get_Now_Angle();
-    float stw_ctrl_torque = motor_stw[0].Get_Control_Torque();
-    const uint8_t *tx = motor_stw[0].Get_Tx_Data();
-    float tx6 = (float)tx[6];
-    float tx7 = (float)tx[7];
-    float stw_count = (float)debug_unknown_can_count;
-    Vofa_USB.Set_Data(7, &stw_now_omega, &stw_now_torque, &stw_now_angle, &stw_ctrl_torque, &tx6, &tx7, &stw_count);
-    Vofa_USB.TIM_1ms_Write_PeriodElapsedCallback();
+    // STW四电机 VOFA+ 监控已迁移到 RTOS monitor_task, 避免在中断里直接占用 USB 发送
 
     TIM_1ms_CAN_PeriodElapsedCallback();
     // 喂狗
@@ -618,17 +669,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
  *   若实测方向不对, 修改下方正负号或调换右侧电机CAN ID
  */
 extern "C" void RTOS_Ctrl_Task_Loop(void)
-{   
-
-
-
-
-
-
-
-
-
-
+{
     /* 使用 PRIMASK 短暂关全局中断来原子读取 16 字节 SBUS 数据结构
      * 避免在 UART DMA 回调写入过程中读到撕裂帧 */
     uint32_t primask = __get_PRIMASK();
@@ -653,7 +694,7 @@ extern "C" void RTOS_Ctrl_Task_Loop(void)
     int16_t ch_turn  = (rc.ch[3] > DEADBAND || rc.ch[3] < -DEADBAND) ? rc.ch[3] : 0;
 
     /* 归一化: ch范围±660 → rad/s */
-    const float MAX_OMEGA = 30.0f;   /* rad/s, 保守限速约64% of 45rad/s额定转速 */
+    const float MAX_OMEGA = STW_V_MAX;   /* rad/s, 放开到驱动配置允许的最大速度 */
     float speed = (float)ch_speed / 660.0f * MAX_OMEGA;
     float turn  = (float)ch_turn  / 660.0f * MAX_OMEGA;
 
@@ -763,4 +804,14 @@ extern "C" void RTOS_Remote_Task_Loop(void)
     }
     /* 预留: 通过 get_i6x_point()->s[x] 读取拨杆状态做模式控制 */
     (void)get_i6x_point();
+}
+
+/**
+ * @brief RTOS 监控任务主循环 (monitor_task, 20ms)
+ *
+ * 功能: 通过 USB CDC 虚拟串口向 VOFA+ 持续输出四个 STW 电机的状态
+ */
+extern "C" void RTOS_Monitor_Task_Loop(void)
+{
+    Send_Vofa_STW_Monitor_Data();
 }

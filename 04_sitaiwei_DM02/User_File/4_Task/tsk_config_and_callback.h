@@ -38,6 +38,9 @@ void RTOS_Ctrl_Task_Loop(void);
 /** 由 freertos.c 的 remote_task 每 20ms 调用一次: 遥控状态机/模式切换 */
 void RTOS_Remote_Task_Loop(void);
 
+/** 由 freertos.c 的 monitor_task 每 20ms 调用一次: USB VOFA+四电机状态输出 */
+void RTOS_Monitor_Task_Loop(void);
+
 #ifdef __cplusplus
 };
 #endif

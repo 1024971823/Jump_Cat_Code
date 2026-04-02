@@ -269,11 +269,13 @@ void Start_remote_task(void *argument)
 void Start_monitor_task(void *argument)
 {
   /* USER CODE BEGIN Start_monitor_task */
-  /* 低优先级监控任务: 50ms 执行一次, 可在此添加调试输出或状态打印 */
+  /* 低优先级监控任务: 每20ms发送一帧 VOFA+ 四电机状态 */
+  uint32_t tick = osKernelGetTickCount();
   for(;;)
   {
-    osDelay(50U);
-    /* 预留: 可扩展监控内容, 如串口打印四电机状态、遥控帧率等 */
+    tick += 20U;
+    osDelayUntil(tick);
+    RTOS_Monitor_Task_Loop();
   }
   /* USER CODE END Start_monitor_task */
 }

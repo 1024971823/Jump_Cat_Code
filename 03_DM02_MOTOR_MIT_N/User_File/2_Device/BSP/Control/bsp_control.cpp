@@ -9,37 +9,55 @@ void Class_Control::Init(UART_HandleTypeDef *huart, uint32_t offline_ms)
 {
     UART_Handler = huart;
     OfflineThreshold = offline_ms;
-    LastReceiveTick = HAL_GetTick();
+    LastReceiveTick = xTaskGetTickCount();
     OfflineFlag = true;
-
     memset(&Data, 0, sizeof(Data));
 
-    // 注册串口接收回调
     UART_Init(huart, UART_RxCallback);
 }
 
 void Class_Control::UART_RxCallback(uint8_t *Buffer, uint16_t Length)
 {
-    // i6x 使用标准 SBUS 帧长度 25 字节
+    // 只处理完整的一帧（25字节）
     if (Length == 25)
     {
+        // 中断临界区保护，防止任务打断数据写入
+        UBaseType_t uxSavedInterruptStatus = taskENTER_CRITICAL_FROM_ISR();
+
         Control.ParseI6x(Buffer);
-        Control.LastReceiveTick = HAL_GetTick();
+        Control.LastReceiveTick = xTaskGetTickCountFromISR();
+
+        taskEXIT_CRITICAL_FROM_ISR(uxSavedInterruptStatus);
     }
-    // 其他长度忽略
 }
 
-void Class_Control::TIM_1ms_Process_PeriodElapsedCallback()
+void Class_Control::CheckOffline()
 {
-    uint32_t now = HAL_GetTick();
-    if ((now - LastReceiveTick) > OfflineThreshold) 
-    {
-        OfflineFlag = true;
-    } 
-    else 
-    {
-        OfflineFlag = false;
-    }
+    uint32_t now = xTaskGetTickCount();
+    bool new_flag = ((now - LastReceiveTick) > OfflineThreshold) ? true : false;
+
+    // 保护 OfflineFlag 的写操作
+    taskENTER_CRITICAL();
+    OfflineFlag = new_flag;
+    taskEXIT_CRITICAL();
+}
+
+Class_Control::Data_t Class_Control::GetDataCopy() const
+{
+    Data_t copy;
+    taskENTER_CRITICAL();
+    copy = Data;                     // 结构体拷贝，原子性由临界区保证
+    taskEXIT_CRITICAL();
+    return copy;
+}
+
+bool Class_Control::IsOffline() const
+{
+    bool flag;
+    taskENTER_CRITICAL();
+    flag = OfflineFlag;
+    taskEXIT_CRITICAL();
+    return flag;
 }
 
 /**

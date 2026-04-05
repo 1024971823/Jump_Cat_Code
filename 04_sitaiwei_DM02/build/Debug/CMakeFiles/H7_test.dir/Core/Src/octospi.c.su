@@ -1,0 +1,3 @@
+/Users/xylm/STM32_Team/A_code/04_sitaiwei_DM02/Core/Src/octospi.c:31:6:MX_OCTOSPI2_Init	32	static
+/Users/xylm/STM32_Team/A_code/04_sitaiwei_DM02/Core/Src/octospi.c:76:6:HAL_OSPI_MspInit	248	static
+/Users/xylm/STM32_Team/A_code/04_sitaiwei_DM02/Core/Src/octospi.c:192:6:HAL_OSPI_MspDeInit	16	static

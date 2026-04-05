@@ -2,10 +2,12 @@
 #define BSP_CONTROL_H
 
 #include "stm32h7xx_hal.h"
-#include <cstdint>      // 推荐使用 C++ 标准头文件
-#include <cstring>
 
-#define RC_CH_VALUE_OFFSET      1024                    // 通道值偏移量（SBUS 中值 1024）
+#include "FreeRTOS.h"
+#include "task.h"
+
+#include <stdint.h>
+#include <string.h>
 
 class Class_Control 
 {
@@ -22,10 +24,9 @@ public:
     };
 
     void Init(UART_HandleTypeDef *huart, uint32_t offline_ms = 100);
-    void TIM_1ms_Process_PeriodElapsedCallback();           // 定时器中断处理函数（用于掉线检测）
-
-    inline const Data_t &GetData() const { return Data; }   // 获取最新遥控器数据（只读）
-    inline bool IsOffline() const { return OfflineFlag; }   // 遥控器掉线标志
+    void CheckOffline();                                    // 由任务周期性调用，检测掉线状态
+    Data_t GetDataCopy(void) const;                         // 线程安全的读取接口
+    bool   IsOffline(void) const;                           // 返回掉线标志
 
 private:
     UART_HandleTypeDef *UART_Handler;                       // 串口句柄
@@ -35,8 +36,9 @@ private:
     bool                OfflineFlag;                        // 当前掉线标志
     
     void ParseI6x(uint8_t *buf);                            // i6x 解析函数
-
     static void UART_RxCallback(uint8_t *Buffer, uint16_t Length);
 };
+
+extern Class_Control Control;
 
 #endif // BSP_CONTROL_H
